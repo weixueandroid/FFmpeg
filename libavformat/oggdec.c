@@ -209,7 +209,7 @@ static int ogg_replace_stream(AVFormatContext *s, uint32_t serial, int nsegs)
     const struct ogg_codec *codec;
     int i = 0;
 
-    if (s->pb->seekable) {
+    if (s->pb->seekable & AVIO_SEEKABLE_NORMAL) {
         uint8_t magic[8];
         int64_t pos = avio_tell(s->pb);
         avio_skip(s->pb, nsegs);
@@ -355,7 +355,7 @@ static int ogg_read_page(AVFormatContext *s, int *sid)
             sync[(sp + 2) & 3] == 'g' && sync[(sp + 3) & 3] == 'S')
             break;
 
-        if(!i && bc->seekable && ogg->page_pos > 0) {
+        if(!i && (bc->seekable & AVIO_SEEKABLE_NORMAL) && ogg->page_pos > 0) {
             memset(sync, 0, 4);
             avio_seek(bc, ogg->page_pos+4, SEEK_SET);
             ogg->page_pos = -1;
@@ -543,7 +543,11 @@ static int ogg_packet(AVFormatContext *s, int *sid, int *dstart, int *dsize,
     os->incomplete = 0;
 
     if (os->header) {
-        os->header = os->codec->header(s, idx);
+        if ((ret = os->codec->header(s, idx)) < 0) {
+            av_log(s, AV_LOG_ERROR, "Header processing failed: %s\n", av_err2str(ret));
+            return ret;
+        }
+        os->header = ret;
         if (!os->header) {
             os->segp  = segp;
             os->psize = psize;
@@ -574,8 +578,12 @@ static int ogg_packet(AVFormatContext *s, int *sid, int *dstart, int *dsize,
     } else {
         os->pflags    = 0;
         os->pduration = 0;
-        if (os->codec && os->codec->packet)
-            os->codec->packet(s, idx);
+        if (os->codec && os->codec->packet) {
+            if ((ret = os->codec->packet(s, idx)) < 0) {
+                av_log(s, AV_LOG_ERROR, "Packet processing failed: %s\n", av_err2str(ret));
+                return ret;
+            }
+        }
         if (sid)
             *sid = idx;
         if (dstart)
@@ -613,7 +621,7 @@ static int ogg_get_length(AVFormatContext *s)
     int64_t size, end;
     int streams_left=0;
 
-    if (!s->pb->seekable)
+    if (!(s->pb->seekable & AVIO_SEEKABLE_NORMAL))
         return 0;
 
 // already set
@@ -719,8 +727,10 @@ static int ogg_read_header(AVFormatContext *s)
                    "Headers mismatch for stream %d: "
                    "expected %d received %d.\n",
                    i, os->codec->nb_header, os->nb_header);
-            if (s->error_recognition & AV_EF_EXPLODE)
+            if (s->error_recognition & AV_EF_EXPLODE) {
+                ogg_read_close(s);
                 return AVERROR_INVALIDDATA;
+            }
         }
         if (os->start_granule != OGG_NOGRANULE_VALUE)
             os->lastpts = s->streams[i]->start_time =
